@@ -1,55 +1,68 @@
 import socket
-import time
 import threading
+from datetime import datetime
 
 UDP_PORT = 4444
-MY_SERVER_IP = "172.27.224.1"
+
+
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 1))
+        ip = s.getsockname()[0]
+    except Exception:
+        ip = '127.0.0.1'
+    finally:
+        s.close()
+    return ip
+
+
+MY_SERVER_IP = get_local_ip()
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 sock.bind(("0.0.0.0", UDP_PORT))
 
-found_devices = {}
+provisioned_devices = set()  # Track IDs that we have already configured
+
+print(f"--- Server Started on {MY_SERVER_IP} ---")
+print("Listening for Loggers and auto-configuring new devices...\n")
 
 
-def listen_for_devices():
-    print("Dashboard listening for Loggers...")
+def handle_incoming_packets():
     while True:
-        data, addr = sock.recvfrom(1024)
-        message = data.decode('utf-8', errors='ignore')
+        try:
+            data, addr = sock.recvfrom(1024)
+            message = data.decode('utf-8', errors='ignore')
+            client_ip = addr[0]
 
-        if message.startswith("LOGGER_BEACON:"):
-            mac_address = message.split(":")[1]
-            if mac_address not in found_devices:
-                print(f"\n[NEW DEVICE FOUND] MAC: {mac_address} at IP: {addr[0]}")
-                found_devices[mac_address] = addr[0]
+            if message.startswith("LOGGER_BEACON:"):
+                device_id = message.split(":")[1]
 
-        elif len(data) == 114:
-            pass
+                if device_id not in provisioned_devices:
+                    print(f"[NEW DEVICE] Found {device_id} at {client_ip}. Sending config...")
 
-listener_thread = threading.Thread(target=listen_for_devices)
-listener_thread.daemon = True
+                    config_msg = f"CONFIG_SET_IP:{MY_SERVER_IP}"
+                    sock.sendto(config_msg.encode(), (client_ip, UDP_PORT))
+
+                    provisioned_devices.add(device_id)
+                else:
+                    pass
+
+            elif "val" in message:
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                print(f"[{timestamp}] DATA from {client_ip}: {message}")
+
+        except Exception as e:
+            print(f"Error processing packet: {e}")
+
+
+listener_thread = threading.Thread(target=handle_incoming_packets, daemon=True)
 listener_thread.start()
 
-while True:
-    cmd = input("\nType 'list' to see devices, or 'connect [MAC]' to configure: ")
-
-    if cmd == "list":
-        print("--- DISCOVERED LOGGERS ---")
-        for mac, ip in found_devices.items():
-            print(f"Device: {mac} | IP: {ip}")
-
-    elif cmd.startswith("connect"):
-        try:
-            target_mac = cmd.split(" ")[1]
-            if target_mac in found_devices:
-                target_ip = found_devices[target_mac]
-
-                msg = f"CONFIG_SET_IP:{MY_SERVER_IP}"
-                sock.sendto(msg.encode(), (target_ip, UDP_PORT))
-
-                print(f"Sent Configuration to {target_mac}. It should start streaming now.")
-            else:
-                print("MAC address not found in list.")
-        except:
-            print("Invalid command. Usage: connect AA:BB:CC:DD:EE:FF")
+try:
+    while True:
+        pass
+except KeyboardInterrupt:
+    print("\nShutting down server...")
+    sock.close()
